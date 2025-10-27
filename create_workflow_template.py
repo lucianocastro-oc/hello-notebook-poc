@@ -26,25 +26,31 @@ from hera.workflows import (
 
 # Hardcoded configuration values
 GIT_REPO_URL = "https://github.com/lucianocastro-oc/hello-notebook-poc.git"
+GIT_BRANCH = "copilot/create-argo-workflow-template"  # Branch to clone
 NOTEBOOK_PATH = "example_notebook.ipynb"  # Path relative to repo root
 RUNNER_IMAGE = "jupyter/minimal-notebook:latest"
 TEMPLATE_NAME = "notebook-workflow-template"
 NAMESPACE = "argo"  # Kubernetes namespace
 
 
-def clone_repository(repo_url: str, target_dir: str) -> str:
+def clone_repository(repo_url: str, target_dir: str, branch: str = None) -> str:
     """
     Clone a git repository to a target directory.
     
     Args:
         repo_url: URL of the git repository
         target_dir: Directory to clone into
+        branch: Optional branch name to checkout
         
     Returns:
         Path to the cloned repository
     """
     print(f"Cloning repository: {repo_url}")
-    repo = Repo.clone_from(repo_url, target_dir)
+    if branch:
+        print(f"Branch: {branch}")
+        repo = Repo.clone_from(repo_url, target_dir, branch=branch)
+    else:
+        repo = Repo.clone_from(repo_url, target_dir)
     print(f"Repository cloned to: {target_dir}")
     return target_dir
 
@@ -129,19 +135,22 @@ def create_workflow_template(
         )
         print(f"  Added parameter: {param_name}")
     
-    # Create the workflow template
+    # Create the workflow template with an entrypoint
     with WorkflowTemplate(
         name=template_name,
         namespace=namespace,
+        entrypoint="run-notebook",
         arguments=workflow_parameters,
     ) as wt:
         # Create a container that runs papermill to execute the notebook
+        # Note: The container assumes the notebook is available in the container
+        # In a real scenario, you would need to add a volume mount or git-sync init container
         Container(
             name="run-notebook",
             image=runner_image,
             command=["papermill"],
             args=[
-                notebook_path,
+                f"/workspace/{notebook_path}",
                 "/output/output_notebook.ipynb",
                 # Add parameter arguments
                 *[f"-p {name} {{{{{name}}}}}" for name in parameters.keys()],
@@ -166,7 +175,7 @@ def main():
     
     try:
         # Step 1: Clone the repository
-        repo_path = clone_repository(GIT_REPO_URL, temp_dir)
+        repo_path = clone_repository(GIT_REPO_URL, temp_dir, GIT_BRANCH)
         
         # Step 2: Find and parse the notebook
         notebook_full_path = os.path.join(repo_path, NOTEBOOK_PATH)
@@ -194,7 +203,7 @@ def main():
         print("SUCCESS!")
         print("=" * 60)
         print(f"\nWorkflow template '{TEMPLATE_NAME}' has been created.")
-        print(f"Namespace: {namespace}")
+        print(f"Namespace: {NAMESPACE}")
         print(f"Parameters found: {len(parameters)}")
         print("\nTo apply this template to your Kubernetes cluster, you would run:")
         print(f"  kubectl apply -f <yaml-file>")
