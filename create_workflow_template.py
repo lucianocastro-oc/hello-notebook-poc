@@ -48,9 +48,7 @@ def clone_repository(repo_url: str, target_dir: str, branch: str = None) -> str:
     print(f"Cloning repository: {repo_url}")
     if branch:
         print(f"Branch: {branch}")
-        repo = Repo.clone_from(repo_url, target_dir, branch=branch)
-    else:
-        repo = Repo.clone_from(repo_url, target_dir)
+    repo = Repo.clone_from(repo_url, target_dir, **({'branch': branch} if branch else {}))
     print(f"Repository cloned to: {target_dir}")
     return target_dir
 
@@ -152,8 +150,8 @@ def create_workflow_template(
             args=[
                 f"/workspace/{notebook_path}",
                 "/output/output_notebook.ipynb",
-                # Add parameter arguments
-                *[f"-p {name} {{{{{name}}}}}" for name in parameters.keys()],
+                # Add parameter arguments using Argo parameter syntax
+                *[f"-p {name} {{{{inputs.parameters.{name}}}}}" for name in parameters.keys()],
             ],
         )
     
