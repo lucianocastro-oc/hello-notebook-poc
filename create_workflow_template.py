@@ -10,6 +10,7 @@ This script:
 """
 
 import os
+import sys
 import tempfile
 import shutil
 from pathlib import Path
@@ -21,8 +22,10 @@ from hera.workflows import (
     WorkflowTemplate,
     Container,
     Parameter,
+    GitArtifact,
+    ArtifactoryArtifact
 )
-
+from hera.shared import global_config
 
 # Hardcoded configuration values
 GIT_REPO_URL = "https://github.com/lucianocastro-oc/hello-notebook-poc.git"
@@ -31,6 +34,7 @@ NOTEBOOK_PATH = "example_notebook.ipynb"  # Path relative to repo root
 RUNNER_IMAGE = "jupyter/minimal-notebook:latest"
 TEMPLATE_NAME = "notebook-workflow-template"
 NAMESPACE = "argo"  # Kubernetes namespace
+ARGO_SERVER_HOST = "https://localhost:2746"
 
 
 def clone_repository(repo_url: str, target_dir: str, branch: str = None) -> str:
@@ -105,17 +109,26 @@ def find_parameters_cell(notebook_path: str) -> Dict[str, Any]:
 
 def create_workflow_template(
     template_name: str,
+    git_repo_url: str,
+    git_branch: str,
     notebook_path: str,
     parameters: Dict[str, Any],
-    runner_image: str,
+    runner_image: str, # <-- Make sure this is "your-username/papermill-runner:latest"
     namespace: str
 ) -> WorkflowTemplate:
     """
     Create an Argo Workflow Template using Hera.
     
+    This template is self-contained:
+    1. It fetches its own code via GitArtifact.
+    2. It installs its own dependencies.
+    3. It saves its own output via ArtifactoryArtifact.
+
     Args:
         template_name: Name for the workflow template
         notebook_path: Path to the notebook within the repository
+        git_repo_url: Jupyter notebook repository url
+        git_branch: Jupyter notebook repository branch
         parameters: Dictionary of parameters extracted from the notebook
         runner_image: Docker image to use for running the notebook
         namespace: Kubernetes namespace
@@ -128,30 +141,75 @@ def create_workflow_template(
     # Convert notebook parameters to Hera Parameter objects
     workflow_parameters = []
     for param_name, default_value in parameters.items():
+        # Clean up the default value (which is a string from your parser)
+        clean_default = default_value.strip("'\" ") 
         workflow_parameters.append(
-            Parameter(name=param_name, value=str(default_value))
+            Parameter(name=param_name, default=clean_default)
         )
-        print(f"  Added parameter: {param_name}")
+        print(f"  Added parameter: {param_name} (default: {clean_default})")
     
-    # Create the workflow template with an entrypoint
     with WorkflowTemplate(
         name=template_name,
         namespace=namespace,
         entrypoint="run-notebook",
         arguments=workflow_parameters,
     ) as wt:
-        # Create a container that runs papermill to execute the notebook
-        # Note: The container assumes the notebook is available in the container
-        # In a real scenario, you would need to add a volume mount or git-sync init container
+        
+        # This container defines the notebook execution step
         Container(
             name="run-notebook",
             image=runner_image,
-            command=["papermill"],
+            inputs=[
+                # 1. Get the code at runtime
+                GitArtifact(
+                    name="repo",
+                    path="/mnt/repo",
+                    repo=git_repo_url,
+                    revision=git_branch,
+                ),
+                # 2. Inherit all workflow parameters
+                *workflow_parameters,
+            ],
+            outputs=[
+                # 3. Save the executed notebook as an artifact
+                ArtifactoryArtifact(
+                    name="executed-notebook",
+                    path="/mnt/outputs/output_notebook.ipynb",
+                )
+            ],
+            command=["/bin/sh", "-c"],
             args=[
-                f"/workspace/{notebook_path}",
-                "/output/output_notebook.ipynb",
-                # Add parameter arguments using Argo parameter syntax
-                *[f"-p {name} {{{{inputs.parameters.{name}}}}}" for name in parameters.keys()],
+                # This multi-line string is the entrypoint
+                f"""
+                set -ex  # Exit on error, print commands
+                
+                # Ensure output directory exists
+                mkdir -p /mnt/outputs
+                
+                # Install dependencies from the repo
+                # (Add error handling if file doesn't exist)
+                if [ -f /mnt/repo/requirements.txt ]; then
+                    pip install -r /mnt/repo/requirements.txt
+                else
+                    echo "No requirements.txt found, skipping."
+                fi
+                
+                # Build the papermill command with parameters
+                papermill_args=""
+                for param_name in {' '.join(parameters.keys())}; do
+                    # This is how we get the value of the Argo parameter
+                    param_value=$(echo "{{{{inputs.parameters.${{param_name}}}}}}")
+                    papermill_args="$papermill_args -p $param_name \"$param_value\""
+                done
+                
+                echo "Running papermill..."
+                
+                # Execute papermill
+                papermill \
+                    /mnt/repo/{notebook_path} \
+                    /mnt/outputs/output_notebook.ipynb \
+                    $papermill_args
+                """
             ],
         )
     
@@ -161,18 +219,25 @@ def create_workflow_template(
 
 def main():
     """
-    Main function to orchestrate the workflow template creation.
+    Main function to orchestrate the workflow template creation and registration.
     """
     print("=" * 60)
-    print("Argo Workflow Template Generator for Jupyter Notebooks")
+    print("Argo Workflow Template Generator & Registrar")
     print("=" * 60)
     print()
+    
+    # Configure Hera to connect to your Argo server
+    # Assumes 'kubectl -n argo port-forward svc/argo-server 2746:2746' is running
+    global_config.host = ARGO_SERVER_HOST
+    global_config.namespace = NAMESPACE
+    global_config.verify_ssl = False  # Set to True in production
+    # global_config.token = "Bearer ..." # Uncomment if your server needs auth
     
     # Create a temporary directory for cloning
     temp_dir = tempfile.mkdtemp(prefix="notebook-workflow-")
     
     try:
-        # Step 1: Clone the repository
+        # Step 1: Clone the repository locally
         repo_path = clone_repository(GIT_REPO_URL, temp_dir, GIT_BRANCH)
         
         # Step 2: Find and parse the notebook
@@ -181,10 +246,14 @@ def main():
             raise FileNotFoundError(f"Notebook not found: {notebook_full_path}")
         
         parameters = find_parameters_cell(notebook_full_path)
+        if not parameters:
+             print(f"Warning: No parameters found in {NOTEBOOK_PATH}. Proceeding anyway.")
         
-        # Step 3: Create the workflow template
+        # Step 3: Create the workflow template object
         workflow_template = create_workflow_template(
             template_name=TEMPLATE_NAME,
+            git_repo_url=GIT_REPO_URL,
+            git_branch=GIT_BRANCH,
             notebook_path=NOTEBOOK_PATH,
             parameters=parameters,
             runner_image=RUNNER_IMAGE,
@@ -197,18 +266,27 @@ def main():
         print("=" * 60)
         print(workflow_template.to_yaml())
         
+        # Step 5: Register the template with the Argo cluster
         print("\n" + "=" * 60)
-        print("SUCCESS!")
+        print(f"Registering template '{TEMPLATE_NAME}' with {global_config.host}...")
         print("=" * 60)
-        print(f"\nWorkflow template '{TEMPLATE_NAME}' has been created.")
-        print(f"Namespace: {NAMESPACE}")
-        print(f"Parameters found: {len(parameters)}")
-        print("\nTo apply this template to your Kubernetes cluster, you would run:")
-        print(f"  kubectl apply -f <yaml-file>")
-        print("\nNote: This script generates the template but does not apply it to the cluster.")
         
+        try:
+            workflow_template.create() # This is the API call
+            print(f"\n✅ SUCCESS!")
+            print(f"WorkflowTemplate '{TEMPLATE_NAME}' was created/updated in namespace '{NAMESPACE}'.")
+            print("You can now submit it from the Argo UI.")
+        except Exception as e:
+            print(f"\n❌ FAILED TO REGISTER TEMPLATE:")
+            print(e)
+            print("\nPlease check:\n"
+                  "1. Is your Argo server running?")
+                  "2. Is 'kubectl port-forward' active?")
+                  "3. Do you have RBAC permissions to create WorkflowTemplates?")
+            sys.exit(1)
+            
     except Exception as e:
-        print(f"\nERROR: {e}")
+        print(f"\nAn unexpected error occurred: {e}")
         raise
     finally:
         # Clean up temporary directory
