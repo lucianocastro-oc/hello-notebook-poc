@@ -27,14 +27,23 @@ from hera.workflows import (
 )
 from hera.shared import global_config
 
-# Hardcoded configuration values
-GIT_REPO_URL = "https://github.com/lucianocastro-oc/hello-notebook-poc.git"
-GIT_BRANCH = "copilot/create-argo-workflow-template"  # Branch to clone
-NOTEBOOK_PATH = "example_notebook.ipynb"  # Path relative to repo root
-RUNNER_IMAGE = "jupyter/minimal-notebook:latest"
-TEMPLATE_NAME = "notebook-workflow-template"
-NAMESPACE = "argo"  # Kubernetes namespace
-ARGO_SERVER_HOST = "https://localhost:2746"
+# Load environment variables from .env file (optional)
+try:
+    import dotenv  # type: ignore
+    dotenv.load_dotenv()
+except ImportError:
+    # dotenv not installed, will rely on system environment variables
+    pass
+
+# Configuration values from environment or defaults
+GIT_REPO_URL = os.getenv("GIT_REPO_URL", "https://github.com/lucianocastro-oc/hello-notebook-poc.git")
+GIT_BRANCH = os.getenv("GIT_BRANCH", "main")  # Branch to clone
+NOTEBOOK_PATH = os.getenv("NOTEBOOK_PATH", "example_notebook.ipynb")  # Path relative to repo root
+RUNNER_IMAGE = os.getenv("RUNNER_IMAGE", "europe-west1-docker.pkg.dev/beeapp-terraform-deployment/app/notebook-runner:0.3.10")
+TEMPLATE_NAME = os.getenv("TEMPLATE_NAME", "lucianocastro-notebook-workflow-template")
+NAMESPACE = os.getenv("NAMESPACE", "argo")  # Kubernetes namespace
+ARGO_SERVER_HOST = os.getenv("ARGO_SERVER_HOST", "https://test.argoworkflows.o-c.space")
+ARGO_TOKEN = os.getenv("ARGO_TOKEN")
 
 
 def clone_repository(repo_url: str, target_dir: str, branch: str = None) -> str:
@@ -230,7 +239,7 @@ def main():
     # Assumes 'kubectl -n argo port-forward svc/argo-server 2746:2746' is running
     global_config.host = ARGO_SERVER_HOST
     global_config.namespace = NAMESPACE
-    global_config.verify_ssl = False  # Set to True in production
+    global_config.verify_ssl = True  # Set to True in production
     # global_config.token = "Bearer ..." # Uncomment if your server needs auth
     
     # Create a temporary directory for cloning
@@ -280,8 +289,8 @@ def main():
             print(f"\n❌ FAILED TO REGISTER TEMPLATE:")
             print(e)
             print("\nPlease check:\n"
-                  "1. Is your Argo server running?")
-                  "2. Is 'kubectl port-forward' active?")
+                  "1. Is your Argo server running?\n"
+                  "2. Is 'kubectl port-forward' active?\n"
                   "3. Do you have RBAC permissions to create WorkflowTemplates?")
             sys.exit(1)
             
